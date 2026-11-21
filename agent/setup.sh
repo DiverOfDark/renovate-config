@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tools for agent.py in the job container (node:24-trixie): PyYAML, gh, kubectl, Claude
+# Tools for agent.py in the job container (node:24-trixie): gh, kubectl, Claude
 # Code, and cargo for regenerating Cargo.lock after a fix (resolution only, no builds).
 # Versions are pinned; Renovate bumps them (customManagers in renovate.json).
 set -eu
@@ -10,8 +10,6 @@ CLAUDE_CODE_VERSION=2.1.330 # renovate: datasource=npm depName=@anthropic-ai/cla
 RUST_VERSION=1.100.0 # renovate: datasource=docker depName=rust
 
 arch=$(dpkg --print-architecture)
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends python3-yaml >/dev/null
 
 curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" \
   | tar -xz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_${arch}/bin/gh"

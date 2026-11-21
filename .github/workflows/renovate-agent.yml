@@ -1,27 +1,33 @@
 name: Renovate agent
+run-name: Renovate agent for ${{ inputs.repo || github.event.client_payload.repo }}
 
-# The AI update job for the app repos in agent/repos.yaml. Every night an LLM reads each
-# open Renovate PR there that has no agent:safe / agent:needs-human verdict yet (diff,
-# release notes, CI logs, how the repo uses the dependency) and comments a verdict; when
-# an update needs a source change to build, it writes the change and agent.py pushes it
-# to the PR. PRs judged safe are merged one at a time once CI is green; CI on the default
-# branch and the GitImage rollout are then watched and the merge reverted if either fails.
-# See agent/agent.py. Same design as the homelab repo's renovate-agent.
+# The AI update job for the owner's repos, one run per repo. Each repo's Renovate run (the
+# reusable renovate.yml) starts it for that repo when it finishes. An LLM reads each open
+# Renovate PR there that has no agent:safe / agent:needs-human verdict yet (diff, release
+# notes, CI logs, how the repo uses the dependency) and comments a verdict; when an update
+# needs a source change to build, it writes the change and agent.py pushes it to the PR.
+# PRs judged safe are merged one at a time once CI is green; CI on the default branch and
+# the GitImage rollout (the GitImage is found by the repo's URL) are then watched and the
+# merge reverted if either fails. See agent/agent.py. Same design as the homelab repo's
+# renovate-agent.
 #
-# Runs on the `renovate-agent-apps` runner scale set in the homelab cluster (one runner
-# for all repos, registered to this repo): its job pods use the read-only renovate-agent
-# ServiceAccount, which can see GitImages and workloads, nothing secret.
+# Runs on the `renovate-agent-apps` runner scale set in the homelab cluster (registered to
+# this repo): its job pods use the read-only renovate-agent ServiceAccount, which can see
+# GitImages and workloads, nothing secret. Repos run in parallel, up to the scale set's
+# maxRunners.
 on:
-  schedule:
-    # After the repos' nightly Renovate runs (03:05-03:46 UTC).
-    - cron: "30 4 * * *"
+  # From renovate.yml: POST /repos/DiverOfDark/renovate-config/dispatches with
+  # event_type renovate-agent and client_payload.repo. Needs contents: write on this repo,
+  # which only the owner and RENOVATE_TOKEN have. agent.py accepts only the owner's repos.
+  repository_dispatch:
+    types: [renovate-agent]
   workflow_dispatch:
     inputs:
       repo:
-        description: "Handle only this repo (owner/name)"
-        default: ""
+        description: "Repo to handle (owner/name)"
+        required: true
       pr:
-        description: "Handle only this PR number (needs repo)"
+        description: "Handle only this PR number"
         default: ""
       force:
         description: "Re-triage PRs that already have a verdict"
@@ -34,8 +40,9 @@ on:
 
 permissions: {}
 
+# One run per repo at a time; a run started meanwhile waits for it.
 concurrency:
-  group: renovate-agent
+  group: renovate-agent-${{ inputs.repo || github.event.client_payload.repo }}
   cancel-in-progress: false
 
 jobs:
@@ -43,10 +50,10 @@ jobs:
     name: Triage
     runs-on: renovate-agent-apps
     container: node:24-trixie
-    # Triage of all repos, then up to 40 merges, each waiting for CI and the rollout
-    # (up to 90 min for gitimage's e2e, 60 for phos). agent.py starts no merge after 20 h,
-    # so the last one is still watched; the next night's run queues behind this one.
-    # Self-hosted runners allow jobs of up to 5 days.
+    # Triage, then up to 10 merges, each waiting for CI and the rollout (up to 90 min for
+    # gitimage's e2e). agent.py starts no merge after 20 h, so the last one is still
+    # watched; the next night's run queues behind this one. Self-hosted runners allow jobs
+    # of up to 5 days.
     timeout-minutes: 1380
     permissions:
       contents: read
@@ -59,13 +66,13 @@ jobs:
       - name: Triage, fix, merge
         env:
           # RENOVATE_TOKEN: the fine-grained token Renovate runs with, scoped to the app
-          # repos. Its pushes (fixes, reverts) start CI, which GITHUB_TOKEN's would not,
+          # repos (so the agent reaches only those). Its pushes (fixes, reverts) start CI, which GITHUB_TOKEN's would not,
           # and GITHUB_TOKEN only reaches this repo anyway. The model never sees it.
           GH_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           RENOVATE_AGENT_MODEL: ${{ vars.RENOVATE_AGENT_MODEL }}
           RENOVATE_AGENT_BUDGET_USD: ${{ vars.RENOVATE_AGENT_BUDGET_USD }}
-          ONLY_REPO: ${{ inputs.repo }}
+          REPO: ${{ inputs.repo || github.event.client_payload.repo }}
           ONLY_PR: ${{ inputs.pr }}
           FORCE: ${{ inputs.force }}
           DRY_RUN: ${{ inputs.dry_run }}

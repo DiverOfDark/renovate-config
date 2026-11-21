@@ -23,4 +23,6 @@ jobs:
     uses: ./.github/workflows/renovate.yml
     with:
       logLevel: ${{ inputs.logLevel || 'info' }}
+      # The agent does not merge its own code and workflows.
+      agent: false
     secrets: inherit

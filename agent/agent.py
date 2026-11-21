@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Renovate agent for the app repos: an LLM reads each open Renovate PR in the repos listed
-in repos.yaml and says whether it can be merged unattended, writing source fixes when the
+"""Renovate agent for one of the owner's repos: an LLM reads each open Renovate PR there and says whether it can be merged unattended, writing source fixes when the
 update needs them to build. Verdicts are posted as PR comments and labels; fixes are
 committed to the PR branch; PRs judged safe are merged one at a time once CI is green,
 then CI on the default branch and the GitImage rollout are watched, and the merge is
 reverted if either fails.
 
-    python3 agent/agent.py          (from the root of a renovate-config checkout)
+    REPO=owner/name python3 agent/agent.py    (from the root of a renovate-config checkout)
+
+Each repo's Renovate run (the reusable .github/workflows/renovate.yml) starts it for that
+repo. Any repo of the token's user qualifies; the token's repository list is what limits it
+in practice. The GitImage that deploys the repo, if any, is found in the cluster by its
+git URL and ref.
 
 Modelled on the homelab repo's .github/renovate-agent/agent.py. The model reads untrusted
 text (release notes, CI logs), so it never gets the GitHub token and has no tool that
@@ -16,12 +20,12 @@ with every credential but its own removed from its environment; so do cargo and 
 this script regenerates lockfiles (without running build scripts).
 
 Environment:
-    GH_TOKEN                   token for every listed repo: read PRs and checks, comment,
-                               label, push to renovate/* branches, merge, push a revert.
-                               A personal token, so its pushes start CI.
+    GH_TOKEN                   token for the repo: read PRs and checks, comment, label,
+                               push to renovate/* branches, merge, push a revert. A
+                               personal token, so its pushes start CI.
     CLAUDE_CODE_OAUTH_TOKEN    Claude credential
-    ONLY_REPO                  handle just this repo (owner/name)
-    ONLY_PR                    handle just this PR number (with ONLY_REPO)
+    REPO                       the repo to handle (owner/name), owned by the token's user
+    ONLY_PR                    handle just this PR number
     FORCE=true                 re-triage PRs that already have a verdict
     DRY_RUN=true               print the comments and the merge plan, change nothing
     RENOVATE_AGENT_MODEL       default: sonnet
@@ -40,15 +44,12 @@ import time
 import tomllib
 from pathlib import Path
 
-import yaml
-
 HERE = Path(__file__).resolve().parent
 WORK = Path("renovate-agent-work").resolve()
 
 AUTO_MERGE_TYPES = ("patch", "minor", "digest", "lockfile")  # what the model may call safe
 BATCH = 6  # PRs per Claude run; each run has its own budget
-MAX_MERGES_PER_REPO = 10  # per run
-MAX_MERGES = 40  # per run, all repos
+MAX_MERGES = 10  # per run
 # No new merge starts later than this after the run began, so the last one is still
 # watched (up to 90 min settle + soak) before the job timeout (23 h) kills the run.
 MERGE_WINDOW = 20 * 60 * 60
@@ -56,8 +57,10 @@ STARTED = time.monotonic()
 MAX_FIX_ATTEMPTS = 2  # fix commits per PR before it needs a human
 MAX_FIXES = 20
 MAX_FIX_LINES = 400  # changed lines in the source files, lockfiles not counted
-CI_WAIT = 30 * 60  # seconds to wait for CI on fix commits before merging what is ready
-DEFAULT_SETTLE_MINUTES = 30  # CI on the merged commit plus the GitImage rollout
+CI_WAIT = 60 * 60  # seconds to wait for CI on new PRs and fix commits before merging what is ready
+# How long CI on the merged commit plus the GitImage build and rollout may take. Only a
+# limit: the watch ends as soon as everything is green. gitimage's e2e needs the most.
+SETTLE = 90 * 60
 NO_CI_GRACE = 5 * 60  # no checks on the merged commit after this long: it has no push CI
 SOAK = 5 * 60  # seconds the rollout must then stay up
 POLL = 30
@@ -138,15 +141,16 @@ def clean_env() -> dict:
 
 
 class Repo:
-    """One entry of repos.yaml, with the state of a run."""
+    """The repo being handled, with the state of the run."""
 
-    def __init__(self, entry: dict, login: str):
-        self.name = entry["repo"]
+    def __init__(self, name: str, login: str):
+        self.name = name
         self.owner = self.name.split("/")[0].lower()
         self.login = login  # the token's user: Renovate's PRs and our comments are by it
-        self.gitimage = entry.get("gitimage")
-        self.settle = int(entry.get("settle_minutes", DEFAULT_SETTLE_MINUTES)) * 60
-        lines = (HERE / "denylist.txt").read_text().splitlines() + list(entry.get("deny", []))
+        self.gitimage = ""  # <namespace>/<name>, set by find_gitimage
+        self.gitimage_problem = ""
+        self.settle = SETTLE
+        lines = (HERE / "denylist.txt").read_text().splitlines()
         self.deny = re.compile("|".join(line.strip() for line in lines if line.strip() and not line.startswith("#")))
         self.work = WORK / self.name.replace("/", "_")
         self.default_branch = ""
@@ -312,6 +316,28 @@ def checkout_repo(repo: Repo) -> None:
     info = json.loads(gh("repo", "view", repo.name, "--json", "defaultBranchRef"))
     repo.default_branch = info["defaultBranchRef"]["name"]
     git("clone", "--quiet", "--depth", "50", "--branch", repo.default_branch, repo.url, "main", cwd=repo.work)
+
+
+def normal_url(url: str) -> str:
+    return url.strip().lower().removesuffix("/").removesuffix(".git")
+
+
+def find_gitimage(repo: Repo) -> None:
+    """The GitImage that builds the repo's default branch, if any. After a merge the agent
+    waits for it to build the merged commit and for every workload bound to it to roll out
+    and stay up, and reverts the merge if that fails. Without one the repo is not deployed
+    straight from its default branch, so only CI on the merged commit is watched."""
+    found = [
+        f"{gi['metadata']['namespace']}/{gi['metadata']['name']}"
+        for gi in kubectl("gitimages.gitimage.dev", "--all-namespaces")["items"]
+        if normal_url(gi.get("spec", {}).get("url", "")) == normal_url(repo.url)
+        and gi["spec"].get("ref", repo.default_branch) in (repo.default_branch, f"refs/heads/{repo.default_branch}")
+    ]
+    if len(found) > 1:
+        # The watch follows one GitImage; merging while another goes unwatched is not safe.
+        repo.gitimage_problem = f"several GitImages build {repo.default_branch} ({', '.join(found)}) and the agent watches only one"
+    repo.gitimage = found[0] if found else ""
+    print(f"{repo.name}: deployed by GitImage {repo.gitimage}" if found else f"{repo.name}: no GitImage builds {repo.default_branch}", flush=True)
 
 
 def fetch_pr(repo: Repo, pr: dict) -> None:
@@ -773,6 +799,8 @@ def gitimage_state(repo: Repo, sha: str) -> tuple[str, str, list[dict], str]:
 def deploy_problem(repo: Repo) -> str:
     """Why merges in this repo cannot be watched right now (its app is already unhealthy,
     so a broken merge would not show), or '' if they can."""
+    if repo.gitimage_problem:
+        return repo.gitimage_problem
     if not repo.gitimage:
         return ""
     namespace, name = repo.gitimage.split("/")
@@ -928,11 +956,11 @@ def merge_candidates(repo: Repo) -> list[dict]:
     ]
 
 
-def merge_safe_prs(repo: Repo, budget: int) -> int:
-    """Merge the repo's safe PRs one at a time; returns how many were merged. The list is
-    read again before every merge, so removing agent:safe meanwhile still works."""
+def merge_safe_prs(repo: Repo) -> None:
+    """Merge the repo's safe PRs one at a time. The list is read again before every merge,
+    so removing agent:safe meanwhile still works."""
     handled = set()
-    while len(handled) < min(budget, MAX_MERGES_PER_REPO):
+    while len(handled) < MAX_MERGES:
         if time.monotonic() - STARTED > MERGE_WINDOW:
             summary(f"- {repo.name}: merge window ({MERGE_WINDOW // 3600} h) is over, the rest waits for the next run")
             break
@@ -942,11 +970,11 @@ def merge_safe_prs(repo: Repo, budget: int) -> int:
         handled.add(candidates[0]["number"])
         if not merge_one(repo, candidates[0]):
             break
-    return len(handled)
 
 
 def wait_for_checks(repo: Repo, numbers: list[int]) -> None:
-    """Give CI on freshly pushed fixes a chance to finish, so they can be merged in this run."""
+    """Give CI on new PRs and freshly pushed fixes a chance to finish, so they can be merged
+    in this run rather than the next."""
     deadline = time.monotonic() + CI_WAIT
     while numbers and not flag("DRY_RUN") and time.monotonic() < deadline:
         time.sleep(POLL * 2)
@@ -956,9 +984,10 @@ def wait_for_checks(repo: Repo, numbers: list[int]) -> None:
         print(f"  waiting for CI on {', '.join(f'{repo.name}#{n}' for n in pending)}", flush=True)
 
 
-def handle(repo: Repo, merge_budget: int) -> int:
-    """Triage one repo's PRs, then merge its safe ones. Returns how many were merged."""
+def handle(repo: Repo) -> None:
+    """Triage the repo's PRs, then merge its safe ones."""
     checkout_repo(repo)
+    find_gitimage(repo)
     prs = select_prs(repo)
     summary(f"\n### {repo.name}: {len(prs)} PRs to triage")
     if prs:
@@ -969,26 +998,23 @@ def handle(repo: Repo, merge_budget: int) -> int:
         for pr in batch:
             fetch_pr(repo, pr)
         fixed += publish(repo, batch, run_claude(repo, batch))
-    wait_for_checks(repo, fixed)
-    return merge_safe_prs(repo, merge_budget)
+    # Renovate has just opened or rebased PRs: their CI is often still running.
+    waiting = [pr["number"] for pr in list_prs(repo) if "agent:safe" in labels(pr) and ci_state(pr) == "pending"]
+    wait_for_checks(repo, sorted(set(fixed + waiting)))
+    merge_safe_prs(repo)
 
 
 def main() -> None:
     login = gh("api", "user", "--jq", ".login").strip()
-    entries = yaml.safe_load((HERE / "repos.yaml").read_text())["repos"]
-    only = os.environ.get("ONLY_REPO", "")
-    repos = [Repo(entry, login) for entry in entries if not only or entry["repo"].lower() == only.lower()]
-    if not repos:
-        sys.exit(f"no repo in repos.yaml matches ONLY_REPO={only}")
+    name = os.environ.get("REPO", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", name) or name.split("/")[0].lower() != login.lower():
+        sys.exit(f"REPO={name!r}: must be owner/name of a repo of {login}")
+    info = json.loads(gh("api", f"repos/{name}"))
+    if info["archived"] or info["fork"]:
+        sys.exit(f"{name} is archived or a fork; not handled")
+    repo = Repo(info["full_name"], login)
     WORK.mkdir(exist_ok=True)
-    merged = 0
-    for repo in repos:
-        try:
-            merged += handle(repo, MAX_MERGES - merged)
-        except subprocess.CalledProcessError as error:
-            # One repo's trouble (a vanished branch, an API error) must not stop the others.
-            # A failure after a merge never gets here: merge_one exits or reverts itself.
-            summary(f"- {repo.name}: skipped after an error: {one_line(error.stderr or error, 400)}")
+    handle(repo)
 
 
 if __name__ == "__main__":
