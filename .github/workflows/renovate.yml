@@ -10,6 +10,10 @@ on:
       logLevel:
         type: string
         default: info
+      agent:
+        description: Start the Renovate agent (renovate-agent.yml) for this repo afterwards
+        type: boolean
+        default: true
     secrets:
       RENOVATE_TOKEN:
         required: true
@@ -29,3 +33,21 @@ jobs:
           RENOVATE_PLATFORM: github
           RENOVATE_ONBOARDING: "false"
           RENOVATE_REQUIRE_CONFIG: required
+
+  # Hands the repo to the Renovate agent in DiverOfDark/renovate-config, which triages the
+  # PRs, fixes and merges the safe ones, and watches the rollout. Also after a failed
+  # Renovate run: the PRs already open still get handled.
+  agent:
+    needs: renovate
+    if: ${{ !cancelled() && inputs.agent }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start the Renovate agent
+        env:
+          GH_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api repos/DiverOfDark/renovate-config/dispatches \
+            -f event_type=renovate-agent -f "client_payload[repo]=$REPO"
+          echo "Started: https://github.com/DiverOfDark/renovate-config/actions/workflows/renovate-agent.yml"
