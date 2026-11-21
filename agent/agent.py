@@ -47,8 +47,12 @@ WORK = Path("renovate-agent-work").resolve()
 
 AUTO_MERGE_TYPES = ("patch", "minor", "digest", "lockfile")  # what the model may call safe
 BATCH = 6  # PRs per Claude run; each run has its own budget
-MAX_MERGES_PER_REPO = 5  # per run
-MAX_MERGES = 15  # per run, all repos
+MAX_MERGES_PER_REPO = 10  # per run
+MAX_MERGES = 40  # per run, all repos
+# No new merge starts later than this after the run began, so the last one is still
+# watched (up to 90 min settle + soak) before the job timeout (23 h) kills the run.
+MERGE_WINDOW = 20 * 60 * 60
+STARTED = time.monotonic()
 MAX_FIX_ATTEMPTS = 2  # fix commits per PR before it needs a human
 MAX_FIXES = 20
 MAX_FIX_LINES = 400  # changed lines in the source files, lockfiles not counted
@@ -929,6 +933,9 @@ def merge_safe_prs(repo: Repo, budget: int) -> int:
     read again before every merge, so removing agent:safe meanwhile still works."""
     handled = set()
     while len(handled) < min(budget, MAX_MERGES_PER_REPO):
+        if time.monotonic() - STARTED > MERGE_WINDOW:
+            summary(f"- {repo.name}: merge window ({MERGE_WINDOW // 3600} h) is over, the rest waits for the next run")
+            break
         candidates = [pr for pr in merge_candidates(repo) if pr["number"] not in handled]
         if not candidates:
             break
