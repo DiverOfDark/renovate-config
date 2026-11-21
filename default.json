@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Shared Renovate config for DiverOfDark image repos. Repos opt in with extends: [\"github>DiverOfDark/renovate-config\"].",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "minimumReleaseAge": "14 days",
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 0,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "Security fixes skip the release-age wait and the schedule.",
+    "labels": [
+      "security"
+    ],
+    "minimumReleaseAge": null,
+    "schedule": [
+      "at any time"
+    ]
+  },
+  "lockFileMaintenance": {
+    "description": "Weekly cargo update / npm lockfile refresh: pulls in patch fixes of transitive deps.",
+    "enabled": true,
+    "schedule": [
+      "* 0-6 * * 1"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Patch updates merge themselves once CI is green. A merge to the default branch deploys through GitImage.",
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "cargo-auditable pinned in Dockerfiles (RUN cargo install cargo-auditable@X.Y.Z --locked).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile[^/]*$/"
+      ],
+      "matchStrings": [
+        "cargo install cargo-auditable@(?<currentValue>[0-9][0-9.]*)"
+      ],
+      "depNameTemplate": "cargo-auditable",
+      "datasourceTemplate": "crate"
+    }
+  ]
+}
