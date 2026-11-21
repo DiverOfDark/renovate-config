@@ -2,5 +2,18 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "github>DiverOfDark/renovate-config"
+  ],
+  "customManagers": [
+    {
+      "description": "Tool versions pinned in agent/setup.sh, marked with a `# renovate:` comment.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^agent/setup\\.sh$/"
+      ],
+      "matchStrings": [
+        "(?<currentValue>[0-9][0-9.]*) # renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)"
+      ],
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    }
   ]
 }

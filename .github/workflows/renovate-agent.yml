@@ -1,0 +1,71 @@
+name: Renovate agent
+
+# The AI update job for the app repos in agent/repos.yaml. Every night an LLM reads each
+# open Renovate PR there that has no agent:safe / agent:needs-human verdict yet (diff,
+# release notes, CI logs, how the repo uses the dependency) and comments a verdict; when
+# an update needs a source change to build, it writes the change and agent.py pushes it
+# to the PR. PRs judged safe are merged one at a time once CI is green; CI on the default
+# branch and the GitImage rollout are then watched and the merge reverted if either fails.
+# See agent/agent.py. Same design as the homelab repo's renovate-agent.
+#
+# Runs on the `renovate-agent-apps` runner scale set in the homelab cluster (one runner
+# for all repos, registered to this repo): its job pods use the read-only renovate-agent
+# ServiceAccount, which can see GitImages and workloads, nothing secret.
+on:
+  schedule:
+    # After the repos' nightly Renovate runs (03:05-03:46 UTC).
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Handle only this repo (owner/name)"
+        default: ""
+      pr:
+        description: "Handle only this PR number (needs repo)"
+        default: ""
+      force:
+        description: "Re-triage PRs that already have a verdict"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Change nothing: print the comments and the merge plan in the log instead"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: renovate-agent
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: Triage
+    runs-on: renovate-agent-apps
+    container: node:24-trixie
+    # Triage of all repos, then up to 15 merges, each waiting for CI and the rollout
+    # (up to 90 min for gitimage's e2e, 60 for phos).
+    timeout-minutes: 600
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: agent/setup.sh
+      - name: Triage, fix, merge
+        env:
+          # RENOVATE_TOKEN: the fine-grained token Renovate runs with, scoped to the app
+          # repos. Its pushes (fixes, reverts) start CI, which GITHUB_TOKEN's would not,
+          # and GITHUB_TOKEN only reaches this repo anyway. The model never sees it.
+          GH_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          RENOVATE_AGENT_MODEL: ${{ vars.RENOVATE_AGENT_MODEL }}
+          RENOVATE_AGENT_BUDGET_USD: ${{ vars.RENOVATE_AGENT_BUDGET_USD }}
+          ONLY_REPO: ${{ inputs.repo }}
+          ONLY_PR: ${{ inputs.pr }}
+          FORCE: ${{ inputs.force }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 agent/agent.py

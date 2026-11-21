@@ -1,0 +1,10 @@
+# Paths the Renovate agent never merges on its own, in any repo: one extended regex per
+# line, matched against every file a PR touches. A hit forces needs-human whatever the
+# model said. Per-repo additions go in repos.yaml (`deny`).
+#
+# Short on purpose: everything else is merged when the model calls it safe and CI is green,
+# then watched (CI on the default branch, the GitImage rollout) and reverted if it fails.
+# Listed is only what can break Renovate or the agent themselves.
+^\.github/workflows/renovate\.yml$
+^renovate\.json5?$
+^\.github/renovate\.json5?$
