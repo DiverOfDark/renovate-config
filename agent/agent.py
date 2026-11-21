@@ -334,9 +334,22 @@ def fetch_pr(repo: Repo, pr: dict) -> None:
 
 
 def log_event(event: dict) -> None:
-    """Print what Claude is doing, as it happens: its notes, each tool call, failed calls."""
-    blocks = event.get("message", {}).get("content", [])
+    """Print what Claude is doing, as it happens: its notes, each tool call, failed calls.
+
+    Logging only: an event shape this does not know (they vary between CLI versions) is
+    skipped, never fatal."""
+    try:
+        print_blocks(event)
+    except (AttributeError, KeyError, TypeError):
+        pass
+
+
+def print_blocks(event: dict) -> None:
+    message = event.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else None
     for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
         kind = block.get("type")
         if kind == "text" and block["text"].strip():
             print(f"  claude: {one_line(block['text'])}", flush=True)
@@ -348,7 +361,7 @@ def log_event(event: dict) -> None:
             args = ", ".join(f"{key}={one_line(value, 150)}" for key, value in block["input"].items())
             print(f"  claude > {block['name']}({args})", flush=True)
         elif kind == "tool_result" and block.get("is_error"):
-            print(f"    failed: {one_line(block.get('content', ''), 200)}", flush=True)
+            print(f"    failed: {one_line(str(block.get('content', '')), 200)}", flush=True)
 
 
 def run_claude(repo: Repo, prs: list[dict]) -> list[dict]:
