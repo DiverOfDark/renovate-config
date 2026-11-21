@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdicts"],
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "verdict", "update_type", "summary", "details", "fixes"],
+        "properties": {
+          "number": {"type": "integer"},
+          "verdict": {"enum": ["safe", "needs-human"]},
+          "update_type": {"enum": ["patch", "minor", "major", "digest", "lockfile", "other"]},
+          "summary": {"type": "string", "maxLength": 200},
+          "details": {"type": "string", "maxLength": 3000},
+          "fixes": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["file", "find", "replace", "reason"],
+              "properties": {
+                "file": {"type": "string"},
+                "find": {"type": "string", "minLength": 1, "maxLength": 6000},
+                "replace": {"type": "string", "maxLength": 6000},
+                "reason": {"type": "string", "maxLength": 300}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
