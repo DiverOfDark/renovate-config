@@ -33,6 +33,25 @@
         "patch"
       ],
       "automerge": true
+    },
+    {
+      "description": "Breaking updates (majors, and 0.x minors which are breaking under semver) usually need code changes. They wait for a tick on the Dependency Dashboard instead of taking PR slots from patches, lockfile maintenance and security fixes.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "0.x minor bumps are breaking under Cargo/npm semver.",
+      "matchManagers": [
+        "cargo",
+        "npm"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "matchCurrentVersion": "/^[~^]?0\\./",
+      "dependencyDashboardApproval": true
     }
   ],
   "customManagers": [
