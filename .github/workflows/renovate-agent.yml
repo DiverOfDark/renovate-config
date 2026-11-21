@@ -43,9 +43,11 @@ jobs:
     name: Triage
     runs-on: renovate-agent-apps
     container: node:24-trixie
-    # Triage of all repos, then up to 15 merges, each waiting for CI and the rollout
-    # (up to 90 min for gitimage's e2e, 60 for phos).
-    timeout-minutes: 600
+    # Triage of all repos, then up to 40 merges, each waiting for CI and the rollout
+    # (up to 90 min for gitimage's e2e, 60 for phos). agent.py starts no merge after 20 h,
+    # so the last one is still watched; the next night's run queues behind this one.
+    # Self-hosted runners allow jobs of up to 5 days.
+    timeout-minutes: 1380
     permissions:
       contents: read
     steps:
